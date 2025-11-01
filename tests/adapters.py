@@ -602,6 +602,8 @@ def run_train_bpe(
     """
     init_vocab  = [byte_to_unicode[i] for i in range(256)] + special_tokens
     init_merges = []
+
+    all_word_count = defaultdict(int)
     with open(input_path, "rb") as f:
         num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
@@ -612,8 +614,11 @@ def run_train_bpe(
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
 
-            word_count = get_word_count(chunk)
-            bpe_chunk(word_count, vocab_size, init_vocab, init_merges)
+            word_count = get_word_count(chunk, special_tokens)
+            for word, count in word_count.items():
+                all_word_count[word] += count
+
+    bpe_chunk(all_word_count, vocab_size, init_vocab, init_merges)
 
     special_tokens_set = set(special_tokens)
     vocab_map = {}
@@ -636,7 +641,6 @@ def bpe_chunk(word_count: dict[str, int], vocab_size: int, vocab: list[str], mer
         merges.append(merged_pair)
         vocab.append(''.join(merged_pair))
         word_to_word_split = merge_word_split(word_to_word_split, merged_pair)
-
 
 def merge_word_split(word_to_word_split, merged_pair):
     new_word_to_word_split = {}
@@ -672,13 +676,21 @@ def init_word_split(words):
         res[word] = tuple(byte_to_unicode[b] for b in word.encode("utf-8"))
     return res
 
-def get_word_count(chunk: str) -> dict[str, int]:
+def get_word_count(chunk: str, special_tokens: list[str] | None = None) -> dict[str, int]:
     word_count = defaultdict(int)
-    for match in re.finditer(PAT, chunk):
-        word = match.group(0)
-        word_count[word] += 1
-    return word_count
 
+    if special_tokens:
+        delimiter = "|".join(re.escape(token) for token in special_tokens)
+        text_segments = re.split(delimiter, chunk)
+    else:
+        text_segments = [chunk]
+
+    for segment in text_segments:
+        for match in re.finditer(PAT, segment):
+            word = match.group(0)
+            word_count[word] += 1
+
+    return word_count
 
 def find_chunk_boundaries(
     file: BinaryIO,
