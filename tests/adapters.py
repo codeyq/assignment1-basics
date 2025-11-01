@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
 
@@ -9,6 +10,10 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
+import regex as re
+import heapq
+
+from .common import gpt2_bytes_to_unicode
 
 def run_linear(
     d_in: int,
@@ -561,6 +566,12 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+byte_to_unicode: dict[int, str] = gpt2_bytes_to_unicode()
+unicode_to_bytes: dict[str, int] = {u: b for (b, u) in byte_to_unicode.items()}
+
+def unicode_str_to_bytes(s: str) -> bytes:
+    return bytes([unicode_to_bytes[c] for c in s])
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -589,4 +600,128 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    init_vocab  = [byte_to_unicode[i] for i in range(256)] + special_tokens
+    init_merges = []
+    with open(input_path, "rb") as f:
+        num_processes = 4
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+
+        # The following is a serial implementation, but you can parallelize this
+        # by sending each start/end pair to a set of processes.
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            f.seek(start)
+            chunk = f.read(end - start).decode("utf-8", errors="ignore")
+
+            word_count = get_word_count(chunk)
+            bpe_chunk(word_count, vocab_size, init_vocab, init_merges)
+
+    special_tokens_set = set(special_tokens)
+    vocab_map = {}
+    for (index, v) in enumerate(init_vocab):
+        if v in special_tokens_set:
+            vocab_map[index] = v.encode("utf-8")
+        else:
+            vocab_map[index] = unicode_str_to_bytes(v)
+    merges_bytes = [
+        tuple(unicode_str_to_bytes(part) for part in merge)
+        for merge in init_merges
+    ]
+    return vocab_map, merges_bytes
+
+def bpe_chunk(word_count: dict[str, int], vocab_size: int, vocab: list[str], merges: list[tuple[bytes]]):
+    word_to_word_split = init_word_split(word_count.keys())
+
+    while len(vocab) < vocab_size:
+        merged_pair = get_merge(word_to_word_split, word_count)
+        merges.append(merged_pair)
+        vocab.append(''.join(merged_pair))
+        word_to_word_split = merge_word_split(word_to_word_split, merged_pair)
+
+
+def merge_word_split(word_to_word_split, merged_pair):
+    new_word_to_word_split = {}
+    left = merged_pair[0]
+    right = merged_pair[1]
+    for (word, word_split) in word_to_word_split.items():
+        new_word_split = []
+        i = 0
+        while i < len(word_split):
+            if i + 1 < len(word_split) and word_split[i] == left and word_split[i + 1] == right:
+                new_word_split.append(''.join(merged_pair))
+                i += 2
+            else:
+                new_word_split.append(word_split[i])
+                i += 1
+        new_word_to_word_split[word] = new_word_split
+    return new_word_to_word_split
+
+def get_merge(word_to_word_split, word_count):
+    pair_count = defaultdict(int)
+    for (word, word_split) in word_to_word_split.items():
+        count = word_count.get(word, 0)
+        length = len(word_split)
+        for pair in zip(word_split[0:length-1], word_split[1:length]):
+            pair_count[pair] += count
+
+    max_tuple = max(pair_count.items(), key=lambda x: (x[1], tuple(unicode_str_to_bytes(s) for s in x[0])))
+    return max_tuple[0]
+
+def init_word_split(words):
+    res = {}
+    for word in words:
+        res[word] = tuple(byte_to_unicode[b] for b in word.encode("utf-8"))
+    return res
+
+def get_word_count(chunk: str) -> dict[str, int]:
+    word_count = defaultdict(int)
+    for match in re.finditer(PAT, chunk):
+        word = match.group(0)
+        word_count[word] += 1
+    return word_count
+
+
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
