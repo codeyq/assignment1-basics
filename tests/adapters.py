@@ -635,38 +635,55 @@ def run_train_bpe(
 
 def bpe_chunk(word_count: dict[str, int], vocab_size: int, vocab: list[str], merges: list[tuple[bytes]]):
     word_to_word_split = init_word_split(word_count.keys())
+    pair_count, pair_to_words = get_pairs(word_to_word_split, word_count)
 
     while len(vocab) < vocab_size:
-        merged_pair = get_merge(word_to_word_split, word_count)
+        merged_pair = get_merge(pair_count)
+        words_to_update = pair_to_words[merged_pair]
+        for word_to_update in words_to_update:
+            old_word_split = word_to_word_split[word_to_update]
+            new_word_split = merge_word_split(merged_pair, words_to_update, old_word_split)
+            for old_pair in get_pair(old_word_split):
+                pair_count[old_pair] -= word_count[word_to_update]
+            for new_pair in get_pair(new_word_split):
+                pair_count[new_pair] += word_count[word_to_update]
+                pair_to_words[new_pair].add(word_to_update)
+            word_to_word_split[word_to_update] = new_word_split
+
         merges.append(merged_pair)
         vocab.append(''.join(merged_pair))
-        word_to_word_split = merge_word_split(word_to_word_split, merged_pair)
 
-def merge_word_split(word_to_word_split, merged_pair):
-    new_word_to_word_split = {}
+def get_pair(word_split):
+    length = len(word_split)
+    return zip(word_split[0:length - 1], word_split[1:length])
+
+def merge_word_split(merged_pair, word, word_split):
     left = merged_pair[0]
     right = merged_pair[1]
-    for (word, word_split) in word_to_word_split.items():
-        new_word_split = []
-        i = 0
-        while i < len(word_split):
-            if i + 1 < len(word_split) and word_split[i] == left and word_split[i + 1] == right:
-                new_word_split.append(''.join(merged_pair))
-                i += 2
-            else:
-                new_word_split.append(word_split[i])
-                i += 1
-        new_word_to_word_split[word] = new_word_split
-    return new_word_to_word_split
+    new_word_split = []
+    i = 0
+    while i < len(word_split):
+        if i + 1 < len(word_split) and word_split[i] == left and word_split[i + 1] == right:
+            new_word_split.append(''.join(merged_pair))
+            i += 2
+        else:
+            new_word_split.append(word_split[i])
+            i += 1
+    return tuple(new_word_split)
 
-def get_merge(word_to_word_split, word_count):
+def get_pairs(word_to_word_split, word_count):
     pair_count = defaultdict(int)
+    pair_to_words = defaultdict(set)
     for (word, word_split) in word_to_word_split.items():
         count = word_count.get(word, 0)
         length = len(word_split)
         for pair in zip(word_split[0:length-1], word_split[1:length]):
             pair_count[pair] += count
+            pair_to_words[pair].add(word)
 
+    return (pair_count, pair_to_words)
+
+def get_merge(pair_count):
     max_tuple = max(pair_count.items(), key=lambda x: (x[1], tuple(unicode_str_to_bytes(s) for s in x[0])))
     return max_tuple[0]
 

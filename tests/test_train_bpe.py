@@ -86,3 +86,6 @@ def test_train_bpe_special_tokens(snapshot):
             "merges": merges,
         },
     )
+
+def test_simple():
+    bpe_chunk({"low": 5, "lower": 2, "widest": 3, "newest": 6}, 256 + 5, [], [])
