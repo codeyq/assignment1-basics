@@ -551,11 +551,14 @@ class Tokenizer:
         self.special_tokens = special_tokens
         self.bytes_to_id = {b: i for i, b in self.vocab.items()}
         self.merge_rank = {merge: idx for idx, merge in enumerate(self.merges)}
+        self.special_tokens_set = set(self.special_tokens or [])
 
     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
         pass
 
     def _encode(self, word):
+        if word in self.special_tokens_set:
+            return [self.bytes_to_id[unicode_str_to_bytes(word)]]
         word_split = get_word_split(word)
         while True:
             pairs = get_pair(word_split)
@@ -579,7 +582,7 @@ class Tokenizer:
 
     def encode(self, text: str) -> list[int]:
         tokens = []
-        words = pre_tokenize(text)
+        words = pre_tokenize(text, keep_special_tokens=True, special_tokens=self.special_tokens)
         for word in words:
             word_tokens = self._encode(word)
             for word_token in word_tokens:
@@ -593,7 +596,7 @@ class Tokenizer:
         res = b""
         for id in ids:
             res += self.vocab[id]
-        return res.decode("utf-8")
+        return res.decode("utf-8", errors="replace")
 
 def get_tokenizer(
     vocab: dict[int, bytes],
@@ -747,23 +750,30 @@ def init_word_split(words):
         res[word] = get_word_split(word)
     return res
 
-def pre_tokenize(chunk, special_tokens: list[str] | None = None):
+def pre_tokenize(chunk, keep_special_tokens: bool, special_tokens: list[str] | None = None):
     res = []
     if special_tokens:
-        delimiter = "|".join(re.escape(token) for token in special_tokens)
-        text_segments = re.split(delimiter, chunk)
+        sorted_tokens = sorted(special_tokens, key=len, reverse=True)
+        delimiter = "|".join(re.escape(token) for token in sorted_tokens)
+        text_segments = re.split(f'({delimiter})', chunk)
     else:
         text_segments = [chunk]
+
     for segment in text_segments:
-        for match in re.finditer(PAT, segment):
-            word = match.group(0)
-            res.append(word)
+        if keep_special_tokens and special_tokens and segment in special_tokens:
+            res.append(segment)
+        elif special_tokens and segment in special_tokens:
+            continue
+        elif segment:
+            for match in re.finditer(PAT, segment):
+                word = match.group(0)
+                res.append(word)
     return res
 
 def get_word_count(chunk: str, special_tokens: list[str] | None = None) -> dict[str, int]:
     word_count = defaultdict(int)
 
-    words = pre_tokenize(chunk, special_tokens)
+    words = pre_tokenize(chunk, keep_special_tokens=False, special_tokens=special_tokens)
     for word in words:
         word_count[word] += 1
     return word_count
