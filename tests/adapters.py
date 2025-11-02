@@ -13,8 +13,21 @@ from torch import Tensor
 
 import regex as re
 from typing import Iterator
+from einops import rearrange, einsum
 
 from .common import gpt2_bytes_to_unicode
+from .conftest import d_model
+
+
+class Linear(torch.nn.Module):
+    def __init__(self, in_features, out_features, device=None, dtype=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.weights = torch.nn.Parameter(torch.empty(out_features, in_features, device=device, dtype=dtype))
+        std = (2.0 / (in_features + out_features)) ** 0.5
+        torch.nn.init.trunc_normal_(self.weights, mean=0, std=std, a=-3 * std, b=3 * std)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return einsum(self.weights, x, "out_features in_features, ... in_features -> ... out_features")
 
 def run_linear(
     d_in: int,
@@ -34,9 +47,18 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    linear = Linear(d_in, d_out)
+    linear.load_state_dict({"weights": weights})
+    return linear.forward(in_features)
 
-    raise NotImplementedError
+class Embedding(torch.nn.Module):
+    def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.embeddings = torch.nn.Parameter(torch.empty(num_embeddings, embedding_dim, device=device, dtype=dtype))
+        torch.nn.init.trunc_normal_(self.embeddings, mean=0, std=1, a=-3, b=3)
 
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings[token_ids]
 
 def run_embedding(
     vocab_size: int,
@@ -56,8 +78,25 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
+    embedding = Embedding(vocab_size, d_model)
+    embedding.load_state_dict({"embeddings": weights})
+    return embedding.forward(token_ids)
 
-    raise NotImplementedError
+class SwiGLU(torch.nn.Module):
+    def __init__(self, d_model, d_ff, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.w1 = torch.nn.Parameter(torch.empty(d_ff, d_model))
+        self.w2 = torch.nn.Parameter(torch.empty(d_model, d_ff))
+        self.w3 = torch.nn.Parameter(torch.empty(d_ff, d_model))
+
+    def _SiLu(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.sigmoid(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w1_x = einsum(self.w1, x, "d_ff d_model, ... d_model -> ... d_ff")
+        w3_x = einsum(self.w3, x, "d_ff d_model, ... d_model -> ... d_ff")
+        res = einsum(self.w2, self._SiLu(w1_x) * w3_x, "d_model d_ff, ... d_ff -> ... d_model")
+        return res
 
 
 def run_swiglu(
@@ -82,14 +121,9 @@ def run_swiglu(
     Returns:
         Float[Tensor, "... d_model"]: Output embeddings of the same shape as the input embeddings.
     """
-    # Example:
-    # If your state dict keys match, you can use `load_state_dict()`
-    # swiglu.load_state_dict(weights)
-    # You can also manually assign the weights
-    # swiglu.w1.weight.data = w1_weight
-    # swiglu.w2.weight.data = w2_weight
-    # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    swiglu = SwiGLU(d_model, d_ff)
+    swiglu.load_state_dict({"w1": w1_weight, "w2": w2_weight, "w3": w3_weight})
+    return swiglu.forward(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -364,6 +398,20 @@ def run_transformer_lm(
     raise NotImplementedError
 
 
+class RMSNorm(torch.nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.d_model = d_model
+        self.eps = eps
+        self.g = torch.nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_type = x.dtype
+        x = x.to(torch.float32)
+        RMS = ((x ** 2).sum(dim=-1, keepdim=True) / self.d_model + self.eps) ** 0.5
+        result = x / RMS * self.g
+        return result.to(in_type)
+
 def run_rmsnorm(
     d_model: int,
     eps: float,
@@ -384,7 +432,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rmsnorm = RMSNorm(d_model, eps)
+    rmsnorm.load_state_dict({"g": weights})
+    return rmsnorm.forward(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
