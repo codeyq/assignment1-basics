@@ -8,10 +8,11 @@ from typing import IO, Any, BinaryIO
 import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
+from sympy.physics.units import speed
 from torch import Tensor
 
 import regex as re
-import heapq
+from typing import Iterator
 
 from .common import gpt2_bytes_to_unicode
 
@@ -543,6 +544,51 @@ def run_load_checkpoint(
     """
     raise NotImplementedError
 
+class Tokenizer:
+    def __init__(self, vocab, merges, special_tokens=None):
+        self.vocab = vocab
+        self.merges = merges
+        self.special_tokens = special_tokens
+        self.bytes_to_id = {b: i for i, b in self.vocab.items()}
+
+    def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
+        pass
+
+    def _encode(self, word):
+        word_split = get_word_split(word)
+        while True:
+            pairs = get_pair(word_split)
+            merged = False
+            for pair in pairs:
+                pair_in_bytes = tuple(unicode_str_to_bytes(b) for b in pair)
+                if pair_in_bytes in self.merges:
+                    word_split = merge_word_split(pair, word_split)
+                    merged = True
+                    break
+            if not merged:
+                break
+        res = []
+        for split in word_split:
+            res.append(self.bytes_to_id[unicode_str_to_bytes(split)])
+        return res
+
+    def encode(self, text: str) -> list[int]:
+        tokens = []
+        words = pre_tokenize(text)
+        for word in words:
+            word_tokens = self._encode(word)
+            for word_token in word_tokens:
+                tokens.append(word_token)
+        return tokens
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        pass
+
+    def decode(self, ids: list[int]) -> str:
+        res = b""
+        for id in ids:
+            res += self.vocab[id]
+        return res.decode("utf-8")
 
 def get_tokenizer(
     vocab: dict[int, bytes],
@@ -564,7 +610,7 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return Tokenizer(vocab, merges, special_tokens)
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 byte_to_unicode: dict[int, str] = gpt2_bytes_to_unicode()
@@ -572,6 +618,9 @@ unicode_to_bytes: dict[str, int] = {u: b for (b, u) in byte_to_unicode.items()}
 
 def unicode_str_to_bytes(s: str) -> bytes:
     return bytes([unicode_to_bytes[c] for c in s])
+
+def get_word_split(word):
+    return tuple(byte_to_unicode[b] for b in word.encode("utf-8"))
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -642,7 +691,7 @@ def bpe_chunk(word_count: dict[str, int], vocab_size: int, vocab: list[str], mer
         words_to_update = pair_to_words[merged_pair]
         for word_to_update in words_to_update:
             old_word_split = word_to_word_split[word_to_update]
-            new_word_split = merge_word_split(merged_pair, words_to_update, old_word_split)
+            new_word_split = merge_word_split(merged_pair, old_word_split)
             for old_pair in get_pair(old_word_split):
                 pair_count[old_pair] -= word_count[word_to_update]
             for new_pair in get_pair(new_word_split):
@@ -655,9 +704,9 @@ def bpe_chunk(word_count: dict[str, int], vocab_size: int, vocab: list[str], mer
 
 def get_pair(word_split):
     length = len(word_split)
-    return zip(word_split[0:length - 1], word_split[1:length])
+    return [c for c in zip(word_split[0:length - 1], word_split[1:length])]
 
-def merge_word_split(merged_pair, word, word_split):
+def merge_word_split(merged_pair, word_split):
     left = merged_pair[0]
     right = merged_pair[1]
     new_word_split = []
@@ -690,23 +739,28 @@ def get_merge(pair_count):
 def init_word_split(words):
     res = {}
     for word in words:
-        res[word] = tuple(byte_to_unicode[b] for b in word.encode("utf-8"))
+        res[word] = get_word_split(word)
     return res
 
-def get_word_count(chunk: str, special_tokens: list[str] | None = None) -> dict[str, int]:
-    word_count = defaultdict(int)
-
+def pre_tokenize(chunk, special_tokens: list[str] | None = None):
+    res = []
     if special_tokens:
         delimiter = "|".join(re.escape(token) for token in special_tokens)
         text_segments = re.split(delimiter, chunk)
     else:
         text_segments = [chunk]
-
     for segment in text_segments:
         for match in re.finditer(PAT, segment):
             word = match.group(0)
-            word_count[word] += 1
+            res.append(word)
+    return res
 
+def get_word_count(chunk: str, special_tokens: list[str] | None = None) -> dict[str, int]:
+    word_count = defaultdict(int)
+
+    words = pre_tokenize(chunk, special_tokens)
+    for word in words:
+        word_count[word] += 1
     return word_count
 
 def find_chunk_boundaries(
