@@ -590,7 +590,10 @@ class Tokenizer:
         return tokens
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-        pass
+        for item in iterable:
+            tokens = self.encode(item)
+            for token in tokens:
+                yield token
 
     def decode(self, ids: list[int]) -> str:
         res = b""
