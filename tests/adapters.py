@@ -550,6 +550,7 @@ class Tokenizer:
         self.merges = merges
         self.special_tokens = special_tokens
         self.bytes_to_id = {b: i for i, b in self.vocab.items()}
+        self.merge_rank = {merge: idx for idx, merge in enumerate(self.merges)}
 
     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
         pass
@@ -558,14 +559,18 @@ class Tokenizer:
         word_split = get_word_split(word)
         while True:
             pairs = get_pair(word_split)
-            merged = False
+            best_pair = None
+            best_rank = float("inf")
             for pair in pairs:
                 pair_in_bytes = tuple(unicode_str_to_bytes(b) for b in pair)
                 if pair_in_bytes in self.merges:
-                    word_split = merge_word_split(pair, word_split)
-                    merged = True
-                    break
-            if not merged:
+                    rank = self.merge_rank[pair_in_bytes]
+                    if rank < best_rank:
+                        best_pair = pair
+                        best_rank = rank
+            if best_pair:
+                word_split = merge_word_split(best_pair, word_split)
+            else:
                 break
         res = []
         for split in word_split:
