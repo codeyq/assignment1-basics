@@ -220,6 +220,39 @@ def run_multihead_self_attention_with_rope(
     """
     raise NotImplementedError
 
+class RoPE(torch.nn.Module):
+    """
+    B站数学推导RoPE
+    https://www.bilibili.com/video/BV1CQoaY2EU2/?spm_id_from=333.337.search-card.all.click&vd_source=c81e3e28e5a94b1383c3bb0eb48a6793
+    """
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.theta = theta
+        self.d_k = d_k
+        self.max_seq_len = max_seq_len
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        half = self.d_k // 2
+        # i <- [0, 1, ..., half)
+        k = torch.arange(0, half)
+        theta = self.theta ** (-2 * k / self.d_k) # [half]
+        # This is the i / (self.theta ** (2 * k) / self.d_k) part
+        # For every token position m
+        # Multiply theta to get the angle matrix
+        angles = token_positions.unsqueeze(-1) * theta # [..., sequence_length, half]
+        cos_angles = torch.cos(angles)
+        sin_angles = torch.sin(angles)
+
+        x_even = x[..., 0::2] # [..., sequence_length, half] [0, 2, ...]
+        x_odd = x[..., 1::2] # [..., sequence_length, half] [1, 3, ...]
+
+        x_even_rotation = x_even * cos_angles - x_odd * sin_angles
+        x_odd_rotation = x_even * sin_angles + x_odd * cos_angles
+
+        res = torch.empty_like(x)
+        res[..., 0::2] = x_even_rotation
+        res[..., 1::2] = x_odd_rotation
+        return res
 
 def run_rope(
     d_k: int,
@@ -240,7 +273,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    rope = RoPE(theta, d_k, max_seq_len)
+    return rope.forward(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
