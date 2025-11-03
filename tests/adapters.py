@@ -230,18 +230,21 @@ class RoPE(torch.nn.Module):
         self.theta = theta
         self.d_k = d_k
         self.max_seq_len = max_seq_len
-
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         half = self.d_k // 2
         # i <- [0, 1, ..., half)
         k = torch.arange(0, half)
-        theta = self.theta ** (-2 * k / self.d_k) # [half]
+        theta = self.theta ** (-2 * k / self.d_k)  # [half]
+        positions = torch.arange(max_seq_len, device=device)
         # This is the i / (self.theta ** (2 * k) / self.d_k) part
         # For every token position m
         # Multiply theta to get the angle matrix
-        angles = token_positions.unsqueeze(-1) * theta # [..., sequence_length, half]
-        cos_angles = torch.cos(angles)
-        sin_angles = torch.sin(angles)
+        angles = positions.unsqueeze(-1) * theta
+        self.cos_cache = torch.cos(angles) # [max_sequence_len, half]
+        self.sin_cache = torch.sin(angles) # [max_sequence_len, half]
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        cos_angles = self.cos_cache[token_positions]  # [..., seq_len, half]
+        sin_angles = self.sin_cache[token_positions]  # [..., seq_len, half]
 
         x_even = x[..., 0::2] # [..., sequence_length, half] [0, 2, ...]
         x_odd = x[..., 1::2] # [..., sequence_length, half] [1, 3, ...]
