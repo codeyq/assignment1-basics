@@ -144,8 +144,12 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
-
+    d_k = Q.shape[-1]
+    scores = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")
+    scores *= d_k ** -0.5
+    scores = scores.masked_fill(mask == False, float("-inf"))
+    scores_softmax = run_softmax(scores, dim=-1) # [... queries]
+    return einsum(scores_softmax, V, "... queries keys, ... keys d_v -> ... queries d_v")
 
 def run_multihead_self_attention(
     d_model: int,
