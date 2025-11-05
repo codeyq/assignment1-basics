@@ -151,6 +151,32 @@ def run_scaled_dot_product_attention(
     scores_softmax = run_softmax(scores, dim=-1) # [... queries]
     return einsum(scores_softmax, V, "... queries keys, ... keys d_v -> ... queries d_v")
 
+
+class MultiHeadSelfAttention(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.q_proj_weight = torch.nn.Parameter(torch.zeros(self.d_model, self.d_model))
+        self.k_proj_weight = torch.nn.Parameter(torch.zeros(self.d_model, self.d_model))
+        self.v_proj_weight = torch.nn.Parameter(torch.zeros(self.d_model, self.d_model))
+        self.o_proj_weight = torch.nn.Parameter(torch.zeros(self.d_model, self.d_model))
+
+    def forward(self, in_features: Float[Tensor, " ... sequence_length d_in"]) -> Float[Tensor, " ... sequence_length d_out]"]:
+        seq_length = in_features.shape[-2]
+        Q = einsum(self.q_proj_weight, in_features, "d_model d_in, ... seq_length d_in -> ... seq_length d_model")
+        K = einsum(self.k_proj_weight, in_features, "d_model d_in, ... seq_length d_in -> ... seq_length d_model")
+        V = einsum(self.v_proj_weight, in_features, "d_model d_in, ... seq_length d_in -> ... seq_length d_model")
+
+        Q = rearrange(Q, "... seq_length (num_heads d_k) -> ... num_heads seq_length d_k", num_heads=self.num_heads)
+        K = rearrange(K, "... seq_length (num_heads d_k) -> ... num_heads seq_length d_k", num_heads=self.num_heads)
+        V = rearrange(V, "... seq_length (num_heads d_v) -> ... num_heads seq_length d_v", num_heads=self.num_heads)
+
+        mask = torch.tril(torch.ones(seq_length, seq_length, dtype=torch.bool))
+        attention = run_scaled_dot_product_attention(Q, K, V, mask)
+        attention = rearrange(attention, "... num_heads seq_length d_v -> ... seq_length (num_heads d_v)")
+        return einsum(self.o_proj_weight, attention, "d_model d_v, ... seq_length d_v -> ... seq_length d_model")
+
 def run_multihead_self_attention(
     d_model: int,
     num_heads: int,
@@ -182,8 +208,44 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    multi_head_self_attention = MultiHeadSelfAttention(d_model, num_heads)
+    multi_head_self_attention.load_state_dict({
+        "q_proj_weight": q_proj_weight,
+        "k_proj_weight": k_proj_weight,
+        "v_proj_weight": v_proj_weight,
+        "o_proj_weight": o_proj_weight,
+    })
+    return multi_head_self_attention.forward(in_features)
 
+class MultiHeadSelfAttentionRoPE(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, max_seq_len: int, theta: float, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = self.d_v = d_model // num_heads
+        self.q_proj_weight = torch.nn.Parameter(torch.zeros(self.d_model, self.d_model))
+        self.k_proj_weight = torch.nn.Parameter(torch.zeros(self.d_model, self.d_model))
+        self.v_proj_weight = torch.nn.Parameter(torch.zeros(self.d_model, self.d_model))
+        self.o_proj_weight = torch.nn.Parameter(torch.zeros(self.d_model, self.d_model))
+        self.rope = RoPE(theta=theta, d_k=self.d_k, max_seq_len=max_seq_len)
+
+    def forward(self, in_features: Float[Tensor, " ... sequence_length d_in"], token_positions: Int[Tensor, " ... sequence_length"] | None = None) -> Float[Tensor, " ... sequence_length d_out]"]:
+        seq_length = in_features.shape[-2]
+        Q = einsum(self.q_proj_weight, in_features, "d_model d_in, ... seq_length d_in -> ... seq_length d_model")
+        K = einsum(self.k_proj_weight, in_features, "d_model d_in, ... seq_length d_in -> ... seq_length d_model")
+        V = einsum(self.v_proj_weight, in_features, "d_model d_in, ... seq_length d_in -> ... seq_length d_model")
+
+        Q = rearrange(Q, "... seq_length (num_heads d_k) -> ... num_heads seq_length d_k", num_heads=self.num_heads)
+        K = rearrange(K, "... seq_length (num_heads d_k) -> ... num_heads seq_length d_k", num_heads=self.num_heads)
+        V = rearrange(V, "... seq_length (num_heads d_v) -> ... num_heads seq_length d_v", num_heads=self.num_heads)
+
+        Q = self.rope.forward(Q, token_positions)
+        K = self.rope.forward(K, token_positions)
+
+        mask = torch.tril(torch.ones(seq_length, seq_length, dtype=torch.bool))
+        attention = run_scaled_dot_product_attention(Q, K, V, mask)
+        attention = rearrange(attention, "... num_heads seq_length d_v -> ... seq_length (num_heads d_v)")
+        return einsum(self.o_proj_weight, attention, "d_model d_v, ... seq_length d_v -> ... seq_length d_model")
 
 def run_multihead_self_attention_with_rope(
     d_model: int,
@@ -222,7 +284,14 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    mha_rope = MultiHeadSelfAttentionRoPE(d_model, num_heads, max_seq_len, theta)
+    mha_rope.load_state_dict({
+        "q_proj_weight": q_proj_weight,
+        "k_proj_weight": k_proj_weight,
+        "v_proj_weight": v_proj_weight,
+        "o_proj_weight": o_proj_weight,
+    })
+    return mha_rope.forward(in_features, token_positions)
 
 class RoPE(torch.nn.Module):
     """
