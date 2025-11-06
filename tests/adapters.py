@@ -352,6 +352,36 @@ def run_rope(
     rope = RoPE(theta, d_k, max_seq_len)
     return rope.forward(in_query_or_key, token_positions)
 
+class Transformer(torch.nn.Module):
+    def __init__(self,
+                 d_model: int,
+                 num_heads: int,
+                 d_ff: int,
+                 max_seq_len: int,
+                 theta: float,
+                 *args,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self.d_model = d_model
+        self.num_heads = num_heads
+
+        self.rms_l1 = RMSNorm(d_model)
+        self.attention = MultiHeadSelfAttentionRoPE(d_model, num_heads, max_seq_len, theta)
+
+        self.rms_l2 = RMSNorm(d_model)
+        self.ffn = SwiGLU(d_model, d_ff)
+
+    def forward(self, x: Float[Tensor, " ... sequence_length d_out"], token_positions: Int[Tensor, " batch sequence_length"] | None = None):
+        x_norm_l1 = self.rms_l1(x)
+        attention_out = self.attention(x_norm_l1, token_positions)
+        x = x + attention_out
+
+        x_norm_l2 = self.rms_l2(x)
+        ffn_out = self.ffn(x_norm_l2)
+        x = x + ffn_out
+
+        return x
+
 
 def run_transformer_block(
     d_model: int,
@@ -423,7 +453,22 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+
+    transformer = Transformer(d_model, num_heads, d_ff, max_seq_len, theta)
+    transformer.load_state_dict({
+        "attention.q_proj_weight": weights["attn.q_proj.weight"],
+        "attention.k_proj_weight": weights["attn.k_proj.weight"],
+        "attention.v_proj_weight": weights["attn.v_proj.weight"],
+        "attention.o_proj_weight": weights["attn.output_proj.weight"],
+        "rms_l1.g": weights["ln1.weight"],
+        "ffn.w1": weights["ffn.w1.weight"],
+        "ffn.w2": weights["ffn.w2.weight"],
+        "ffn.w3": weights["ffn.w3.weight"],
+        "rms_l2.g": weights["ln2.weight"],
+    })
+    batch_size, seq_len, d_model = in_features.shape
+    token_positions = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
+    return transformer.forward(in_features, token_positions)
 
 
 def run_transformer_lm(
