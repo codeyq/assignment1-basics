@@ -662,8 +662,16 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    # log(softmax(x)) = x - max(x) - log(sum(exp(x - max(x))))
+    shifted_inputs = inputs - torch.max(inputs, dim=-1, keepdim=True).values
+    log_sum_exp = torch.log(torch.sum(torch.exp(shifted_inputs), dim=-1, keepdim=True))
+    log_probs = shifted_inputs - log_sum_exp
 
+    # Gather the log probabilities for the target classes
+    batch_size = inputs.shape[0]
+    target_log_probs = log_probs[torch.arange(batch_size), targets]
+
+    return -torch.mean(target_log_probs)
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
     """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
