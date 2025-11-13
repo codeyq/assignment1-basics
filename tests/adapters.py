@@ -684,7 +684,14 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    grads = [p.grad for p in parameters if p.grad is not None]
+    if len(grads) == 0:
+        return
+    norm = torch.sqrt(sum(torch.sum(grad ** 2) for grad in grads))
+    threshold = max_l2_norm / (norm + 1e-6)
+    if threshold < 1.0:
+        for grad in grads:
+            grad.mul_(threshold)
 
 class AdamW(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
